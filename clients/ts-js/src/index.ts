@@ -6,6 +6,10 @@ export const LINEAR_TTL_HEADER = "Nats-Linear-TTL";
 export const LINEAR_OUTBOX_ID_HEADER = "Nats-Linear-Outbox-Id";
 export const LINEAR_DLQ_REASON_HEADER = "Nats-Linear-DLQ-Reason";
 export const LINEAR_DLQ_ORIGINAL_SUBJECT_HEADER = "Nats-Linear-Original-Subject";
+export const LINEAR_PQC_ALGORITHM_HEADER = "Nats-Linear-PQC-Alg";
+export const LINEAR_PQC_PUBLIC_KEY_HEADER = "Nats-Linear-PQC-Public-Key";
+export const DPOP_HEADER = "DPoP";
+export const LINEAR_PQC_ALGORITHM = "ML-KEM-768";
 
 export class LinearMessage {
   readonly subject: string;
@@ -45,10 +49,20 @@ export class LinearMessage {
   }
 }
 
+export interface SecurityOptions {
+  dpopToken?: string;
+  pqcPublicKey?: string;
+}
+
 export async function publishLinear(nc: NatsConnection, subject: string, payload: Uint8Array, ttlMs?: number): Promise<void> {
+  publishLinearWithSecurity(nc, subject, payload, ttlMs);
+}
+
+export function publishLinearWithSecurity(nc: NatsConnection, subject: string, payload: Uint8Array, ttlMs?: number, security?: SecurityOptions): void {
   const h = headers();
   h.set(LINEAR_EVENT_HEADER, LINEAR_EVENT_TYPE);
   if (ttlMs && ttlMs > 0) h.set(LINEAR_TTL_HEADER, String(ttlMs));
+  applySecurityHeaders(h, security);
   nc.publish(subject, payload, { headers: h });
 }
 
@@ -66,6 +80,7 @@ export async function subscribeLinear(nc: NatsConnection, subject: string, cb: (
 export interface OutboxOptions {
   maxAttempts?: number;
   dlqSubject?: string;
+  security?: SecurityOptions;
 }
 
 export interface OutboxEntry {
@@ -80,11 +95,13 @@ export class Outbox {
   private readonly entries: OutboxEntry[] = [];
   private readonly maxAttempts: number;
   private readonly dlqSubject?: string;
+  private readonly security?: SecurityOptions;
   private nextId = 0;
 
   constructor(private readonly nc: NatsConnection, options: OutboxOptions = {}) {
     this.maxAttempts = Math.max(1, options.maxAttempts ?? 3);
     this.dlqSubject = options.dlqSubject;
+    this.security = options.security;
   }
 
   enqueueLinear(subject: string, payload: Uint8Array, ttlMs?: number): string {
@@ -101,7 +118,7 @@ export class Outbox {
     for (let index = 0; index < this.entries.length;) {
       const entry = this.entries[index];
       try {
-        this.nc.publish(entry.subject, entry.payload, { headers: linearHeaders(entry) });
+        this.nc.publish(entry.subject, entry.payload, { headers: linearHeaders(entry, this.security) });
         this.entries.splice(index, 1);
       } catch (err) {
         entry.attempts += 1;
@@ -116,12 +133,22 @@ export class Outbox {
   }
 }
 
-function linearHeaders(entry: OutboxEntry) {
+function linearHeaders(entry: OutboxEntry, security?: SecurityOptions) {
   const h = headers();
   h.set(LINEAR_EVENT_HEADER, LINEAR_EVENT_TYPE);
   h.set(LINEAR_OUTBOX_ID_HEADER, entry.id);
   if (entry.ttlMs && entry.ttlMs > 0) h.set(LINEAR_TTL_HEADER, String(entry.ttlMs));
+  applySecurityHeaders(h, security);
   return h;
+}
+
+function applySecurityHeaders(h: ReturnType<typeof headers>, security?: SecurityOptions): void {
+  if (!security) return;
+  if (security.pqcPublicKey) {
+    h.set(LINEAR_PQC_ALGORITHM_HEADER, LINEAR_PQC_ALGORITHM);
+    h.set(LINEAR_PQC_PUBLIC_KEY_HEADER, security.pqcPublicKey);
+  }
+  if (security.dpopToken) h.set(DPOP_HEADER, security.dpopToken);
 }
 
 function dlqHeaders(entry: OutboxEntry, err: unknown) {

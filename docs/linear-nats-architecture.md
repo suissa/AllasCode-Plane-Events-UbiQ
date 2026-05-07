@@ -20,6 +20,7 @@ This document describes the custom Linear Event layer added on top of the NATS s
 | Go client | `github.com/nats-io/nats.go` | Publishes and subscribes to linear events, plus outbox/DLQ helpers. |
 | Rust client | `async-nats`, `tokio`, `bytes`, `futures` | Async linear publish/subscribe helpers, TTL cleanup, outbox modeling, and tests. |
 | TS/JS client | `nats`, TypeScript, Node test runner | Linear publish/subscribe helpers, TTL cleanup, outbox/DLQ helpers, and tests. |
+| Security | mTLS, ML-KEM-768/Kyber, DPoP | mTLS authenticates the transport, ML-KEM-768 advertises ephemeral post-quantum key material for linear events, and DPoP binds publishes to a proof token. |
 
 ## Header contract
 
@@ -32,6 +33,19 @@ The feature is intentionally header-driven, so older clients and normal NATS mes
 | `Nats-Linear-Outbox-Id` | Client-generated id | Outbox | Correlates original publish attempts and DLQ records. |
 | `Nats-Linear-DLQ-Reason` | Error text | Outbox | Explains why the message was moved to DLQ. |
 | `Nats-Linear-Original-Subject` | Subject name | Outbox | Records the original target subject for the DLQ payload. |
+| `Nats-Linear-PQC-Alg` | `ML-KEM-768` | Security helper | Identifies the Kyber/ML-KEM parameter set used for ephemeral linear key material. |
+| `Nats-Linear-PQC-Public-Key` | Base64url public key | Security helper | Carries the ephemeral post-quantum public key for the linear event. |
+| `DPoP` | Compact proof JWT/token | Security helper | Provides a proof-of-possession binding for the publish. |
+
+## Security model: mTLS, PQC, and DPoP
+
+The transport security layer remains standard NATS TLS/mTLS. The Go helper exposes `Connect(url, security, opts...)`, which applies a caller-provided `tls.Config`; applications should configure client certificates, root CAs, server name validation, and minimum TLS versions there.
+
+For post-quantum protection metadata, the Go helper uses Go's `crypto/mlkem` implementation of ML-KEM-768, the NIST-standardized successor to Kyber. When `EnablePQC` is set, every linear publish receives a fresh ephemeral ML-KEM-768 public key in `Nats-Linear-PQC-Public-Key` and an algorithm marker in `Nats-Linear-PQC-Alg`. The private decapsulation key is intentionally ephemeral and not retained by the outbox after header generation. Rust and TS/JS expose the same headers for runtimes that generate or obtain PQC key material externally.
+
+For DPoP, the Go helper can generate ES256 proof JWTs using a P-256 key. The proof includes the method `NATS`, the subject as the URI binding, an issued-at timestamp, and a random JTI. Rust and TS/JS helpers accept externally supplied DPoP tokens and attach them to the same `DPoP` header.
+
+These security headers are additive: existing NATS clients can ignore them, while security-aware consumers or gateways can validate them before processing the payload.
 
 ## Server-side architecture
 
@@ -59,6 +73,12 @@ Each helper client implements the same conceptual API:
 - If TTL expires before first access, the retained payload is destroyed and future access returns no payload.
 
 The TTL is intentionally enforced by the client helper, not by the server. This means TTL is about local payload retention after delivery, not broker-side message expiration.
+
+## Managed queue lifecycle
+
+A linear queue should remain open after it is created. The Go helper's `StartLinearQueue` creates a queue subscription and a destroy-event subscription. The queue is drained and closed only when the configured destroy subject receives a NATS event, or when the caller's context is canceled. If no destroy event arrives and the network connection drops, reconnect attempts happen every `ReconnectEvery` interval; the default is one second. `ReconnectFor` configures the total reconnect window and is translated into the NATS client's max reconnect count.
+
+This lifecycle is useful for long-lived linear workers: creating the queue does not imply ownership of its destruction; destruction is an explicit NATS event.
 
 ## Outbox pattern
 
@@ -134,6 +154,8 @@ Producer application
 - Monitor DLQ subjects; a growing DLQ usually indicates connectivity, permission, or subject-routing problems.
 - Treat in-memory outboxes as process-local reliability. Persist entries externally if messages must survive process restarts.
 - Keep TTL values longer than the expected handler scheduling delay; too-short TTLs can destroy payloads before handlers get CPU time.
+- Configure `ReconnectFor` on managed queues so workers reconnect every second only for the operationally acceptable recovery window.
+- Treat DPoP and PQC headers as verifiable security metadata at application boundaries until all consumers enforce them.
 - Use JetStream for broker-side retention, replay, and durable consumer workflows. Linear client TTL is local memory cleanup, not stream retention.
 
 ## Compatibility notes
@@ -149,7 +171,7 @@ Producer application
 | --- | --- |
 | Server linear header constants and routing | `server/client.go` |
 | Server linear behavior tests | `server/linear_event_test.go` |
-| Go client, outbox, DLQ | `clients/go/linear.go` |
+| Go client, outbox, DLQ, mTLS/PQC/DPoP, managed queue | `clients/go/linear.go` |
 | Go client tests | `clients/go/linear_test.go` |
 | Rust client, outbox, DLQ | `clients/rust/src/lib.rs` |
 | TypeScript/JavaScript client, outbox, DLQ | `clients/ts-js/src/index.ts` |

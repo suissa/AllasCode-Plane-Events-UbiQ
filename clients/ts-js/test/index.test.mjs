@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { headers } from "nats";
-import { LINEAR_DLQ_ORIGINAL_SUBJECT_HEADER, LINEAR_DLQ_REASON_HEADER, LINEAR_EVENT_HEADER, LINEAR_EVENT_TYPE, LINEAR_OUTBOX_ID_HEADER, LINEAR_TTL_HEADER, LinearMessage, Outbox } from "../dist/index.js";
+import { DPOP_HEADER, LINEAR_DLQ_ORIGINAL_SUBJECT_HEADER, LINEAR_DLQ_REASON_HEADER, LINEAR_EVENT_HEADER, LINEAR_EVENT_TYPE, LINEAR_OUTBOX_ID_HEADER, LINEAR_PQC_ALGORITHM, LINEAR_PQC_ALGORITHM_HEADER, LINEAR_PQC_PUBLIC_KEY_HEADER, LINEAR_TTL_HEADER, LinearMessage, Outbox } from "../dist/index.js";
 
 function msg(data, linear = false, ttlMs) {
   const h = headers();
@@ -78,4 +78,18 @@ test("outbox moves failed messages to DLQ after max attempts", () => {
   assert.equal(published[1].subject, "linear.dlq");
   assert.equal(published[1].options.headers.get(LINEAR_DLQ_ORIGINAL_SUBJECT_HEADER), "linear.out");
   assert.equal(published[1].options.headers.get(LINEAR_DLQ_REASON_HEADER), "publish failed");
+});
+
+
+test("outbox applies supplied PQC and DPoP security headers", () => {
+  const published = [];
+  const nc = { publish: (subject, data, options) => published.push({ subject, data, options }) };
+  const outbox = new Outbox(nc, { security: { dpopToken: "proof.jwt", pqcPublicKey: "kyber-public-key" } });
+
+  outbox.enqueueLinear("linear.secure", new TextEncoder().encode("payload"));
+  outbox.flush();
+
+  assert.equal(published[0].options.headers.get(LINEAR_PQC_ALGORITHM_HEADER), LINEAR_PQC_ALGORITHM);
+  assert.equal(published[0].options.headers.get(LINEAR_PQC_PUBLIC_KEY_HEADER), "kyber-public-key");
+  assert.equal(published[0].options.headers.get(DPOP_HEADER), "proof.jwt");
 });

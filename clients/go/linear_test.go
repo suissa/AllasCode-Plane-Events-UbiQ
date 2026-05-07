@@ -3,6 +3,7 @@ package linear
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,5 +124,33 @@ func TestOutboxMovesEntryToDLQAfterMaxAttempts(t *testing.T) {
 	}
 	if got := dlq.Header.Get(LinearDLQReasonHeader); got == "" {
 		t.Fatalf("expected DLQ reason header")
+	}
+}
+
+func TestPublishWithSecurityAddsPQCAndDPoPHeaders(t *testing.T) {
+	pub := &fakePublisher{}
+	key, err := GenerateDPoPKey()
+	if err != nil {
+		t.Fatalf("generate dpop key: %v", err)
+	}
+	security := &SecurityOptions{EnablePQC: true, DPoPKey: key, DPoPIssuer: "issuer"}
+
+	outbox := NewOutbox(pub, OutboxOptions{Security: security})
+	outbox.EnqueueLinear("linear.secure", []byte("payload"), 0)
+	if err := outbox.Flush(); err != nil {
+		t.Fatalf("flush failed: %v", err)
+	}
+	if len(pub.msgs) != 1 {
+		t.Fatalf("expected one published message, got %d", len(pub.msgs))
+	}
+	msg := pub.msgs[0]
+	if got := msg.Header.Get(LinearPQCAlgorithmHeader); got != linearPQCAlgorithm {
+		t.Fatalf("expected PQC algorithm header %q, got %q", linearPQCAlgorithm, got)
+	}
+	if got := msg.Header.Get(LinearPQCPublicKeyHeader); got == "" {
+		t.Fatalf("expected ephemeral PQC public key header")
+	}
+	if got := msg.Header.Get(DPoPHeader); strings.Count(got, ".") != 2 {
+		t.Fatalf("expected compact DPoP JWT, got %q", got)
 	}
 }
