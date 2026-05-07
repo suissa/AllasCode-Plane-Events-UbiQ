@@ -20,6 +20,7 @@ This document describes the custom Linear Event layer added on top of the NATS s
 | Go client | `github.com/nats-io/nats.go` | Publishes and subscribes to linear events, plus outbox/DLQ helpers. |
 | Rust client | `async-nats`, `tokio`, `bytes`, `futures` | Async linear publish/subscribe helpers, TTL cleanup, outbox modeling, and tests. |
 | TS/JS client | `nats`, TypeScript, Node test runner | Linear publish/subscribe helpers, TTL cleanup, outbox/DLQ helpers, and tests. |
+| Gleam client | Gleam, gleeunit, npm script wrapper | Client generated from the behavior JSON to validate language-neutral generation and TDD scenarios. |
 | Security | mTLS, ML-KEM-768/Kyber, DPoP | mTLS authenticates the transport, ML-KEM-768 advertises ephemeral post-quantum key material for linear events, and DPoP binds publishes to a proof token. |
 
 ## Header contract
@@ -176,3 +177,5 @@ Producer application
 | Rust client, outbox, DLQ | `clients/rust/src/lib.rs` |
 | TypeScript/JavaScript client, outbox, DLQ | `clients/ts-js/src/index.ts` |
 | TypeScript/JavaScript tests | `clients/ts-js/test/index.test.mjs` |
+| AI client behavior definition | `docs/linear-client-definition.json` |
+| Gleam generated client and tests | `clients/gleam` |

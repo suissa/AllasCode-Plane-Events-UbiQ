@@ -38,5 +38,6 @@ For crash-safe producer guarantees, persist outbox entries in application storag
 - Go: `clients/go/linear.go`
 - Rust: `clients/rust/src/lib.rs`
 - TypeScript/JavaScript: `clients/ts-js/src/index.ts`
+- Gleam: `clients/gleam/src/nats_linear.gleam`
 
-For a full architecture and operations guide, see `docs/linear-nats-architecture.md`.
+The language-neutral AI generation contract lives in `docs/linear-client-definition.json`. For a full architecture and operations guide, see `docs/linear-nats-architecture.md`.
