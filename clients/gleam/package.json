@@ -1,0 +1,8 @@
+{
+  "name": "nats-linear-client-gleam",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "gleam test"
+  }
+}

@@ -1,76 +1,176 @@
-<p align="center">
-  <img src="logos/nats-horizontal-color.png" width="300" alt="NATS Logo">
-</p>
+# UbiQ
 
-[NATS](https://nats.io) is a simple, secure and performant communications system for digital systems, services and devices. NATS is part of the Cloud Native Computing Foundation ([CNCF](https://cncf.io)). NATS has over [40 client language implementations](https://nats.io/download/), and its server can run on-premise, in the cloud, at the edge, and even on a Raspberry Pi. NATS can secure and simplify design and operation of modern distributed systems.
+UbiQ is a NATS server with super powers
 
-[![License][License-Image]][License-Url] [![Build][Build-Status-Image]][Build-Status-Url] [![Release][Release-Image]][Release-Url] [![Slack][Slack-Image]][Slack-Url] [![Coverage][Coverage-Image]][Coverage-Url] [![Docker Downloads][Docker-Image]][Docker-Url] [![GitHub Downloads][GitHub-Image]][Somsubhra-URL] [![CII Best Practices][CIIBestPractices-Image]][CIIBestPractices-Url] [![Artifact Hub][ArtifactHub-Image]][ArtifactHub-Url]
+[NATS documentation](https://docs.nats.io)
 
-## Documentation
+UbiQ extends the NATS server with an opt-in Linear event layer, multi-language helper clients, outbox/DLQ workflows, optional security metadata, and developer automation. It keeps regular NATS behavior intact unless a publisher explicitly marks a message as Linear.
 
-- [Official Website](https://nats.io)
-- [Official Documentation](https://docs.nats.io)
-- [FAQ](https://docs.nats.io/reference/faq)
-- Watch [a video overview](https://rethink.synadia.com/episodes/1/) of NATS.
-- Watch [this video from SCALE 13x](https://www.youtube.com/watch?v=sm63oAVPqAM) to learn more about its origin story and design philosophy.
+## What UbiQ adds to NATS
 
-## Contact
+### Header-driven Linear delivery
 
-- [Twitter](https://twitter.com/nats_io): Follow us on Twitter!
-- [Google Groups](https://groups.google.com/forum/#!forum/natsio): Where you can ask questions
-- [Slack](https://natsio.slack.com): Click [here](https://slack.nats.io) to join. You can ask questions to our maintainers and to the rich and active community.
+UbiQ introduces a Linear event mode using NATS headers:
 
-## Contributing
+```text
+Nats-Event-Type: Linear
+```
 
-If you are interested in contributing to NATS, read about our...
+When this header is present, the server delivers the message to exactly one matching subscriber instead of fanning it out to every plain subscriber. Messages without this header keep normal NATS fanout behavior.
 
-- [Contributing guide](./CONTRIBUTING.md)
-- [Report issues or propose Pull Requests](https://github.com/nats-io)
+### Client-side single-access payloads
 
-[License-Url]: https://www.apache.org/licenses/LICENSE-2.0
-[License-Image]: https://img.shields.io/badge/License-Apache2-blue.svg
-[Docker-Image]: https://img.shields.io/docker/pulls/_/nats.svg
-[Docker-Url]: https://hub.docker.com/_/nats
-[Slack-Image]: https://img.shields.io/badge/chat-on%20slack-green
-[Slack-Url]: https://slack.nats.io
-[Fossa-Url]: https://app.fossa.io/projects/git%2Bgithub.com%2Fnats-io%2Fnats-server?ref=badge_shield
-[Fossa-Image]: https://app.fossa.io/api/projects/git%2Bgithub.com%2Fnats-io%2Fnats-server.svg?type=shield
-[Build-Status-Url]: https://github.com/nats-io/nats-server/actions/workflows/tests.yaml
-[Build-Status-Image]: https://github.com/nats-io/nats-server/actions/workflows/tests.yaml/badge.svg?branch=main
-[Release-Url]: https://github.com/nats-io/nats-server/releases/latest
-[Release-Image]: https://img.shields.io/github/v/release/nats-io/nats-server
-[Coverage-Url]: https://coveralls.io/r/nats-io/nats-server?branch=main
-[Coverage-image]: https://coveralls.io/repos/github/nats-io/nats-server/badge.svg?branch=main
-[ReportCard-Url]: https://goreportcard.com/report/nats-io/nats-server
-[ReportCard-Image]: https://goreportcard.com/badge/github.com/nats-io/nats-server
-[CIIBestPractices-Url]: https://bestpractices.coreinfrastructure.org/projects/1895
-[CIIBestPractices-Image]: https://bestpractices.coreinfrastructure.org/projects/1895/badge
-[ArtifactHub-Url]: https://artifacthub.io/packages/helm/nats/nats
-[ArtifactHub-Image]: https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/nats
-[GitHub-Release]: https://github.com/nats-io/nats-server/releases/
-[GitHub-Image]: https://img.shields.io/github/downloads/nats-io/nats-server/total.svg?logo=github
-[Somsubhra-url]: https://somsubhra.github.io/github-release-stats/?username=nats-io&repository=nats-server
+UbiQ helper clients wrap received messages with Linear-aware access semantics:
 
-## Roadmap
+- the first access to a Linear payload returns the payload;
+- after the first access, the helper destroys its retained local copy;
+- a second access to the same Linear payload returns no payload;
+- non-Linear messages remain reusable and preserve normal client behavior.
 
-The NATS product roadmap can be found [here](https://nats.io/about/#roadmap).
+### TTL-based local retention
 
-## Adopters
+Linear messages can include a local retention TTL:
 
-Who uses NATS? See our [list of users](https://nats.io/#who-uses-nats) on [https://nats.io](https://nats.io).
+```text
+Nats-Linear-TTL: <milliseconds>
+```
 
-## Security
+If a Linear payload is not accessed before the TTL expires, the helper client destroys its retained local copy. This TTL is a client-side memory-retention policy, not broker-side persistence or JetStream retention.
 
-### Security Audit
+### Producer outbox
 
-A third party security audit was performed by Trail of Bits following engagement by the Open Source Technology Improvement Fund (OSTIF). You can see the [full report from April 2025 here](https://github.com/trailofbits/publications/blob/master/reviews/2025-04-ostif-nats-securityreview.pdf).
+UbiQ clients include an in-memory outbox pattern for Linear publishes:
 
-### Reporting Security Vulnerabilities
+1. enqueue a Linear publish locally;
+2. copy the payload into the outbox;
+3. assign a correlatable outbox id;
+4. flush pending entries;
+5. remove entries after successful publish;
+6. keep failed entries for retry until the configured attempt limit.
 
-If you've found a vulnerability or a potential vulnerability in the NATS server, please let us know at
-[nats-security](mailto:security@nats.io).
+Outbox entries carry:
+
+```text
+Nats-Linear-Outbox-Id: <id>
+```
+
+### Dead-letter queue (DLQ)
+
+When a publish reaches the configured retry limit, the helper can move the payload to a DLQ subject with diagnostic headers:
+
+```text
+Nats-Linear-DLQ-Reason: <error>
+Nats-Linear-Original-Subject: <original subject>
+Nats-Linear-Outbox-Id: <id>
+```
+
+The DLQ preserves the original payload and enough metadata for operators to inspect, replay, or discard failed events.
+
+### Optional security metadata
+
+UbiQ supports optional security evidence on Linear publishes:
+
+- mTLS through the native NATS/TLS configuration path;
+- PQC/Kyber metadata using ML-KEM-768 public key evidence;
+- DPoP proof metadata attached to the publish.
+
+Security-aware consumers or gateways can validate these headers before processing a payload:
+
+```text
+Nats-Linear-PQC-Alg: ML-KEM-768
+Nats-Linear-PQC-Public-Key: <ephemeral public key evidence>
+DPoP: <proof token>
+```
+
+### Managed Linear queues
+
+The Go helper includes a managed queue lifecycle helper. A managed Linear queue:
+
+- remains open after creation;
+- closes only when a configured NATS destroy subject receives an event, or when the local context is canceled;
+- reconnects every second by default when the connection drops;
+- keeps reconnecting until the configured reconnect window is exhausted.
+
+This is useful for long-lived Linear workers that should not disappear just because the initial setup has completed.
+
+## Multi-language clients
+
+UbiQ includes helper clients for:
+
+- Go: `clients/go`
+- Rust: `clients/rust`
+- TypeScript/JavaScript: `clients/ts-js`
+- Gleam: `clients/gleam`
+
+The clients follow the same behavior contract while using language-appropriate APIs and test tools.
+
+## AI client generation contract
+
+`docs/linear-client-definition.json` defines the Linear client behavior in a language-neutral way. It includes:
+
+- the exact behaviors a generated client must implement;
+- a specific prompt for AI-based client generation;
+- a TDD workflow requirement;
+- mandatory tests;
+- BDD scenarios that unify Linear delivery, TTL, outbox, DLQ, security metadata, and managed queues.
+
+Use this JSON to generate equivalent clients for additional languages without copying type definitions from existing implementations.
+
+## Quickstart
+
+Use the `ubiq` helper to set up dependencies and run the server.
+
+```bash
+./ubiq setup
+./ubiq run
+```
+
+If you add this repository to your `PATH`, you can run:
+
+```bash
+ubiq setup
+ubiq run
+```
+
+See [QUICKSTART.md](./QUICKSTART.md) for prerequisites, setup details, run examples, smoke tests, and client test commands.
+
+## Running the server
+
+By default, `ubiq run` starts the server on `127.0.0.1:4222`:
+
+```bash
+./ubiq run
+```
+
+Pass native NATS server flags after `run`:
+
+```bash
+./ubiq run -DV -p 4223
+```
+
+Or configure the default host and port:
+
+```bash
+UBIQ_HOST=0.0.0.0 UBIQ_PORT=4223 ./ubiq run
+```
+
+## Documentation map
+
+- [Quickstart](./QUICKSTART.md)
+- [Linear client behavior definition](./docs/linear-client-definition.json)
+- [Linear NATS architecture](./docs/linear-nats-architecture.md)
+- [Client helpers](./clients/README.md)
+- [NATS documentation](https://docs.nats.io)
+
+## Compatibility
+
+UbiQ remains compatible with normal NATS usage:
+
+- existing NATS clients can publish and subscribe normally;
+- unmarked messages preserve standard NATS fanout;
+- Linear behavior activates only when the publisher sets `Nats-Event-Type: Linear`;
+- security metadata is additive and can be ignored by consumers that do not validate it.
 
 ## License
 
-Unless otherwise noted, the NATS source files are distributed
-under the Apache Version 2.0 license found in the LICENSE file.
+Unless otherwise noted, the NATS source files are distributed under the Apache Version 2.0 license found in the LICENSE file.
