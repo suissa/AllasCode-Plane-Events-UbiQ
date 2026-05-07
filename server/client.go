@@ -132,8 +132,11 @@ var readLoopReportThreshold = readLoopReport
 type clientFlag uint16
 
 const (
-	hdrLine      = "NATS/1.0\r\n"
-	emptyHdrLine = "NATS/1.0\r\n\r\n"
+	hdrLine           = "NATS/1.0\r\n"
+	emptyHdrLine      = "NATS/1.0\r\n\r\n"
+	LinearEventHeader = "Nats-Event-Type"
+	LinearEventType   = "Linear"
+	LinearTTLHeader   = "Nats-Linear-TTL"
 )
 
 // Some client state represented as flags
@@ -233,6 +236,7 @@ const (
 	pmrIgnoreEmptyQueueFilter
 	pmrAllowSendFromRouteToRoute
 	pmrMsgImportedFromService
+	pmrLinearDelivery
 )
 
 type WriteTimeoutPolicy uint8
@@ -4401,8 +4405,12 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 
 	// Check for no interest, short circuit if so.
 	// This is the fanout scale.
+	linear := c.isLinearEvent(msg)
 	if len(r.psubs)+len(r.qsubs) > 0 {
 		flag := pmrNoFlag
+		if linear {
+			flag |= pmrLinearDelivery
+		}
 		// If there are matching queue subs and we are in gateway mode,
 		// we need to keep track of the queue names the messages are
 		// delivered to. When sending to the GWs, the RMSG will include
@@ -4416,7 +4424,7 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 	}
 
 	// Now deal with gateways
-	if c.srv.gateway.enabled {
+	if c.srv.gateway.enabled && !linear {
 		reply := c.pa.reply
 		if len(c.pa.deliver) > 0 && c.kind == JETSTREAM && len(reply) > 0 && !replyHasJSAckSuffix(reply) {
 			reply = append(reply, '@')
@@ -4441,6 +4449,13 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 	}
 
 	return didDeliver, false
+}
+
+func (c *client) isLinearEvent(msg []byte) bool {
+	if c.pa.hdr <= 0 || c.pa.hdr > len(msg) {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(bytesToString(sliceHeader(LinearEventHeader, msg[:c.pa.hdr]))), LinearEventType)
 }
 
 // Return the subscription for this reply subject. Only look at normal subs for this client.
@@ -5104,6 +5119,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 	}
 
 	var didDeliver bool
+	var queues [][]byte
 
 	// delivery subject for clients
 	var dsubj []byte
@@ -5162,6 +5178,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 	}
 
 	mt, traceOnly := c.isMsgTraceEnabled()
+	linear := flags&pmrLinearDelivery != 0
 
 	// Loop over all normal subscriptions that match.
 	for _, sub := range r.psubs {
@@ -5259,15 +5276,17 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 		if restorePaTrace {
 			c.pa.trace = mt
 		}
+		if linear && didDeliver {
+			c.in.rts = c.in.rts[:0]
+			updateStats()
+			return didDeliver, queues
+		}
 	}
 
 	// Set these up to optionally filter based on the queue lists.
 	// This is for messages received from routes which will have directed
 	// guidance on which queue groups we should deliver to.
 	qf := c.pa.queues
-
-	// Declared here because of goto.
-	var queues [][]byte
 
 	var leafOrigin string
 	switch c.kind {
@@ -5501,6 +5520,12 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 				queues = append(queues, rsub.queue)
 			}
 		}
+	}
+
+	if linear && didDeliver {
+		c.in.rts = c.in.rts[:0]
+		updateStats()
+		return didDeliver, queues
 	}
 
 sendToRoutesOrLeafs:

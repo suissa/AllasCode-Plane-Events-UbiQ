@@ -1,0 +1,84 @@
+{
+  "name": "linear_nats_client_behavior_definition",
+  "version": "1.0.0",
+  "purpose": "Definir, por comportamento e não por tipos de dados, como gerar um client Linear NATS em qualquer linguagem com TDD.",
+  "language_generation_prompt": "Você é uma IA geradora de código. Crie um client Linear NATS idiomático para a linguagem solicitada. Não copie tipos de dados de outras linguagens; escolha estruturas, módulos, abstrações assíncronas e mecanismos de teste naturais da linguagem alvo. Desenvolva com TDD: primeiro escreva testes que expressem os comportamentos obrigatórios abaixo, depois implemente o menor código que os faça passar e refatore mantendo os testes verdes. O client deve ser header-driven e compatível com clientes NATS existentes: mensagens sem o marcador Linear preservam comportamento normal; mensagens com marcador Linear têm payload acessável uma vez, TTL local opcional, outbox em memória, DLQ e metadados de segurança opcionais. Se a linguagem tiver biblioteca NATS madura, integre com ela; se não houver dependência disponível, modele comandos/headers de publish e ciclo de vida de fila de forma testável para que a integração real possa ser adicionada depois. Inclua documentação de uso, exemplos mínimos e um comando de teste executável por npm quando o repositório pedir interoperabilidade com automação JavaScript.",
+  "headers": {
+    "linear_marker": { "name": "Nats-Event-Type", "behavior": "quando o valor representa Linear, ativa semântica linear" },
+    "ttl": { "name": "Nats-Linear-TTL", "behavior": "define tempo local máximo de retenção de payload não acessado" },
+    "outbox_id": { "name": "Nats-Linear-Outbox-Id", "behavior": "correlaciona tentativa de publish, logs e DLQ" },
+    "dlq_reason": { "name": "Nats-Linear-DLQ-Reason", "behavior": "explica por que o evento foi movido para DLQ" },
+    "dlq_original_subject": { "name": "Nats-Linear-Original-Subject", "behavior": "preserva o destino original no evento de DLQ" },
+    "pqc_algorithm": { "name": "Nats-Linear-PQC-Alg", "behavior": "identifica o mecanismo pós-quântico usado para evidência efêmera" },
+    "pqc_public_key": { "name": "Nats-Linear-PQC-Public-Key", "behavior": "carrega evidência pública efêmera para validação por consumidores conscientes de PQC" },
+    "dpop": { "name": "DPoP", "behavior": "carrega prova de posse vinculada ao publish" }
+  },
+  "required_behaviors": [
+    "Publicar evento Linear deve incluir marcador Linear e TTL quando configurado.",
+    "Receber evento Linear deve reter payload até o primeiro acesso ou expiração do TTL local.",
+    "Primeiro acesso a payload Linear deve retornar o payload e destruir a cópia retida pelo client.",
+    "Segundo acesso ao mesmo payload Linear deve indicar ausência de payload.",
+    "Evento sem marcador Linear deve preservar acesso reutilizável e comportamento fanout normal do NATS.",
+    "Outbox deve enfileirar publishes lineares, copiar payload, gerar identificador correlacionável e permanecer com entrada até publish confirmado.",
+    "Flush de outbox bem-sucedido deve emitir publish Linear e remover entrada confirmada.",
+    "Falha de publish abaixo do limite deve incrementar tentativas e manter entrada para retry.",
+    "Falha no limite configurado deve emitir evento para DLQ quando DLQ estiver configurada.",
+    "Evento de DLQ deve preservar payload original, destino original, razão da falha e id de outbox.",
+    "mTLS deve ser configurável via mecanismo nativo da linguagem ou biblioteca NATS, sem hardcode de certificados.",
+    "PQC deve gerar ou aceitar evidência efêmera por publish; quando a linguagem não tiver Kyber/ML-KEM nativo, deve aceitar evidência externa e documentar a integração.",
+    "DPoP deve gerar ou aceitar prova de posse por publish e anexá-la ao header DPoP.",
+    "Fila gerenciada deve permanecer aberta após criação e só deve fechar ao receber evento NATS de destruição ou cancelamento explícito do processo.",
+    "Se a fila gerenciada perder conexão sem evento de destruição, deve tentar reconectar a cada 1 segundo por padrão até o tempo máximo configurado."
+  ],
+  "mandatory_tests": [
+    { "name": "linear_access_is_single_use", "behavior": "dado payload Linear, primeiro acesso retorna payload e segundo acesso não retorna payload" },
+    { "name": "ttl_destroys_unread_linear_payload", "behavior": "dado payload Linear não acessado, expiração de TTL remove payload local" },
+    { "name": "non_linear_payload_is_reusable", "behavior": "dado evento não Linear, múltiplos acessos retornam payload" },
+    { "name": "publish_builds_linear_headers", "behavior": "publish Linear inclui marcador Linear e TTL quando configurado" },
+    { "name": "outbox_success_removes_entry", "behavior": "flush confirmado publica evento Linear e esvazia entrada" },
+    { "name": "outbox_retry_keeps_entry", "behavior": "falha antes do limite mantém entrada e incrementa tentativa" },
+    { "name": "outbox_dlq_after_limit", "behavior": "falha no limite gera comando/evento de DLQ com headers diagnósticos" },
+    { "name": "security_headers_are_attached", "behavior": "quando evidências PQC e DPoP são configuradas, publish/outbox anexa headers de segurança" },
+    { "name": "managed_queue_closes_only_on_destroy_event", "behavior": "fila aberta ignora eventos comuns e fecha apenas no subject de destruição" },
+    { "name": "managed_queue_reconnect_policy", "behavior": "fila aberta recomenda retry a cada 1 segundo por padrão até janela configurada" }
+  ],
+  "bdd_features": [
+    {
+      "feature": "Consumo Linear de payload",
+      "scenarios": [
+        "Dado um evento Linear recebido, quando o handler acessa o payload, então recebe o conteúdo e a retenção local é destruída.",
+        "Dado o mesmo evento Linear já acessado, quando o handler tenta acessar novamente, então nenhum payload é retornado.",
+        "Dado um evento não Linear, quando o handler acessa repetidamente, então o comportamento de reutilização permanece disponível."
+      ]
+    },
+    {
+      "feature": "Retenção por TTL",
+      "scenarios": [
+        "Dado um evento Linear com TTL, quando o TTL expira antes de acesso, então o payload local é destruído.",
+        "Dado um evento não Linear com header de TTL acidental, quando o tempo passa, então o payload reutilizável não é destruído pela semântica Linear."
+      ]
+    },
+    {
+      "feature": "Outbox e DLQ",
+      "scenarios": [
+        "Dado um evento enfileirado, quando o publish é confirmado, então a entrada sai do outbox.",
+        "Dado falhas repetidas até o limite, quando DLQ está configurada, então o payload original é publicado na DLQ com razão e subject original.",
+        "Dado falha antes do limite, quando flush termina com erro, então a entrada continua pronta para retry."
+      ]
+    },
+    {
+      "feature": "Segurança e ciclo de vida",
+      "scenarios": [
+        "Dado segurança configurada, quando um evento Linear é publicado, então headers PQC efêmeros e DPoP acompanham o publish.",
+        "Dado fila gerenciada criada, quando nenhum evento de destruição chega, então ela permanece aberta e tenta reconectar conforme configuração.",
+        "Dado fila gerenciada criada, quando chega evento no subject de destruição, então a fila drena/fecha de forma controlada."
+      ]
+    }
+  ],
+  "acceptance": {
+    "must_include_tests_before_or_with_implementation": true,
+    "must_document_language_specific_choices": true,
+    "must_not_require_server_changes_for_client_generation": true,
+    "must_expose_a_test_command": "npm test ou script npm equivalente quando solicitado"
+  }
+}
