@@ -29,7 +29,7 @@ export class LinearMessage {
 
   access(): Uint8Array | undefined {
     if (!this.payload) return undefined;
-    const value = this.linear ? this.payload : new Uint8Array(this.payload);
+    const value = new Uint8Array(this.payload);
     if (this.linear) this.destroy();
     return value;
   }

@@ -41,9 +41,14 @@ pub async fn publish(
     let mut headers = HeaderMap::new();
     headers.insert(LINEAR_EVENT_HEADER, HeaderValue::from(LINEAR_EVENT_TYPE));
     if let Some(ttl) = ttl {
-        headers.insert(LINEAR_TTL_HEADER, HeaderValue::from(ttl.as_millis().to_string()));
+        headers.insert(
+            LINEAR_TTL_HEADER,
+            HeaderValue::from(ttl.as_millis().to_string()),
+        );
     }
-    client.publish_with_headers(subject.into(), headers, payload.into()).await
+    client
+        .publish_with_headers(subject.into(), headers, payload.into())
+        .await
 }
 
 pub async fn subscribe<F, Fut>(
@@ -91,5 +96,55 @@ fn from_message(msg: Message) -> LinearMessage {
         headers: msg.headers,
         payload,
         linear,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_nats::Subject;
+
+    fn message(payload: &'static str, linear: bool, ttl_ms: Option<u64>) -> Message {
+        let mut headers = HeaderMap::new();
+        if linear {
+            headers.insert(LINEAR_EVENT_HEADER, HeaderValue::from(LINEAR_EVENT_TYPE));
+        }
+        if let Some(ttl_ms) = ttl_ms {
+            headers.insert(LINEAR_TTL_HEADER, HeaderValue::from(ttl_ms.to_string()));
+        }
+        Message {
+            subject: Subject::from("linear.test"),
+            reply: None,
+            payload: Bytes::from_static(payload.as_bytes()),
+            headers: Some(headers),
+            status: None,
+            description: None,
+            length: payload.len(),
+        }
+    }
+
+    #[tokio::test]
+    async fn linear_access_destroys_payload() {
+        let msg = from_message(message("secret", true, None));
+
+        assert_eq!(msg.access().await.as_deref(), Some(&b"secret"[..]));
+        assert!(msg.access().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn linear_ttl_destroys_unread_payload() {
+        let msg = from_message(message("expires", true, Some(10)));
+
+        sleep(Duration::from_millis(50)).await;
+        assert!(msg.access().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn non_linear_access_is_reusable_and_ignores_ttl() {
+        let msg = from_message(message("reusable", false, Some(10)));
+
+        sleep(Duration::from_millis(50)).await;
+        assert_eq!(msg.access().await.as_deref(), Some(&b"reusable"[..]));
+        assert_eq!(msg.access().await.as_deref(), Some(&b"reusable"[..]));
     }
 }
