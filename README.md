@@ -8,6 +8,7 @@
 
 ## Documentation
 
+- [Linear NATS Quickstart](./QUICKSTART.md)
 - [Official Website](https://nats.io)
 - [Official Documentation](https://docs.nats.io)
 - [FAQ](https://docs.nats.io/reference/faq)
