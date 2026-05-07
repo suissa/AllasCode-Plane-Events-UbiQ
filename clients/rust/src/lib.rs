@@ -1,6 +1,7 @@
 use async_nats::{HeaderMap, HeaderValue, Message};
 use bytes::Bytes;
 use futures::StreamExt;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
@@ -8,6 +9,142 @@ use tokio::time::{sleep, Duration};
 pub const LINEAR_EVENT_HEADER: &str = "Nats-Event-Type";
 pub const LINEAR_EVENT_TYPE: &str = "Linear";
 pub const LINEAR_TTL_HEADER: &str = "Nats-Linear-TTL";
+pub const LINEAR_OUTBOX_ID_HEADER: &str = "Nats-Linear-Outbox-Id";
+pub const LINEAR_DLQ_REASON_HEADER: &str = "Nats-Linear-DLQ-Reason";
+pub const LINEAR_DLQ_ORIGINAL_SUBJECT_HEADER: &str = "Nats-Linear-Original-Subject";
+
+#[derive(Clone, Debug)]
+pub struct OutboxEntry {
+    pub id: String,
+    pub subject: String,
+    pub payload: Bytes,
+    pub ttl: Option<Duration>,
+    pub attempts: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct OutboxOptions {
+    pub max_attempts: usize,
+    pub dlq_subject: Option<String>,
+}
+
+pub struct Outbox {
+    entries: VecDeque<OutboxEntry>,
+    next_id: u64,
+    max_attempts: usize,
+    dlq_subject: Option<String>,
+}
+
+impl Outbox {
+    pub fn new(options: OutboxOptions) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            next_id: 0,
+            max_attempts: options.max_attempts.max(1),
+            dlq_subject: options.dlq_subject,
+        }
+    }
+
+    pub fn enqueue_linear(
+        &mut self,
+        subject: impl Into<String>,
+        payload: impl Into<Bytes>,
+        ttl: Option<Duration>,
+    ) -> String {
+        self.next_id += 1;
+        let id = self.next_id.to_string();
+        self.entries.push_back(OutboxEntry {
+            id: id.clone(),
+            subject: subject.into(),
+            payload: payload.into(),
+            ttl,
+            attempts: 0,
+        });
+        id
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub async fn flush(
+        &mut self,
+        client: &async_nats::Client,
+    ) -> Result<(), async_nats::PublishError> {
+        let mut remaining = VecDeque::new();
+        while let Some(mut entry) = self.entries.pop_front() {
+            match client
+                .publish_with_headers(
+                    entry.subject.clone(),
+                    entry.linear_headers(),
+                    entry.payload.clone(),
+                )
+                .await
+            {
+                Ok(()) => continue,
+                Err(err) => {
+                    entry.attempts += 1;
+                    if entry.attempts >= self.max_attempts {
+                        if let Some(dlq_subject) = &self.dlq_subject {
+                            match client
+                                .publish_with_headers(
+                                    dlq_subject.clone(),
+                                    entry.dlq_headers(err.to_string()),
+                                    entry.payload.clone(),
+                                )
+                                .await
+                            {
+                                Ok(()) => continue,
+                                Err(dlq_err) => {
+                                    remaining.push_back(entry);
+                                    remaining.extend(self.entries.drain(..));
+                                    self.entries = remaining;
+                                    return Err(dlq_err);
+                                }
+                            }
+                        }
+                    }
+                    remaining.push_back(entry);
+                    remaining.extend(self.entries.drain(..));
+                    self.entries = remaining;
+                    return Err(err);
+                }
+            }
+        }
+        self.entries = remaining;
+        Ok(())
+    }
+}
+
+impl OutboxEntry {
+    fn linear_headers(&self) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(LINEAR_EVENT_HEADER, HeaderValue::from(LINEAR_EVENT_TYPE));
+        headers.insert(LINEAR_OUTBOX_ID_HEADER, HeaderValue::from(self.id.clone()));
+        if let Some(ttl) = self.ttl {
+            headers.insert(
+                LINEAR_TTL_HEADER,
+                HeaderValue::from(ttl.as_millis().to_string()),
+            );
+        }
+        headers
+    }
+
+    fn dlq_headers(&self, reason: String) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(LINEAR_OUTBOX_ID_HEADER, HeaderValue::from(self.id.clone()));
+        headers.insert(LINEAR_DLQ_REASON_HEADER, HeaderValue::from(reason));
+        headers.insert(
+            LINEAR_DLQ_ORIGINAL_SUBJECT_HEADER,
+            HeaderValue::from(self.subject.clone()),
+        );
+        headers
+    }
+}
 
 pub struct LinearMessage {
     pub subject: String,
@@ -146,5 +283,57 @@ mod tests {
         sleep(Duration::from_millis(50)).await;
         assert_eq!(msg.access().await.as_deref(), Some(&b"reusable"[..]));
         assert_eq!(msg.access().await.as_deref(), Some(&b"reusable"[..]));
+    }
+
+    #[test]
+    fn outbox_enqueue_builds_linear_headers() {
+        let mut outbox = Outbox::new(OutboxOptions {
+            max_attempts: 3,
+            dlq_subject: Some("linear.dlq".to_string()),
+        });
+        let id = outbox.enqueue_linear(
+            "linear.out",
+            Bytes::from_static(b"payload"),
+            Some(Duration::from_millis(25)),
+        );
+
+        assert_eq!(id, "1");
+        assert_eq!(outbox.len(), 1);
+        let entry = outbox.entries.front().expect("entry");
+        let headers = entry.linear_headers();
+        assert_eq!(
+            headers.get(LINEAR_EVENT_HEADER).unwrap().as_str(),
+            LINEAR_EVENT_TYPE
+        );
+        assert_eq!(headers.get(LINEAR_OUTBOX_ID_HEADER).unwrap().as_str(), "1");
+        assert_eq!(headers.get(LINEAR_TTL_HEADER).unwrap().as_str(), "25");
+    }
+
+    #[test]
+    fn outbox_entry_builds_dlq_headers() {
+        let entry = OutboxEntry {
+            id: "abc".to_string(),
+            subject: "linear.out".to_string(),
+            payload: Bytes::from_static(b"payload"),
+            ttl: None,
+            attempts: 1,
+        };
+
+        let headers = entry.dlq_headers("publish failed".to_string());
+        assert_eq!(
+            headers.get(LINEAR_OUTBOX_ID_HEADER).unwrap().as_str(),
+            "abc"
+        );
+        assert_eq!(
+            headers.get(LINEAR_DLQ_REASON_HEADER).unwrap().as_str(),
+            "publish failed"
+        );
+        assert_eq!(
+            headers
+                .get(LINEAR_DLQ_ORIGINAL_SUBJECT_HEADER)
+                .unwrap()
+                .as_str(),
+            "linear.out"
+        );
     }
 }

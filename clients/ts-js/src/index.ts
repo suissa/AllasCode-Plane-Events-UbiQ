@@ -3,6 +3,9 @@ import { headers, type Msg, type NatsConnection, type Subscription } from "nats"
 export const LINEAR_EVENT_HEADER = "Nats-Event-Type";
 export const LINEAR_EVENT_TYPE = "Linear";
 export const LINEAR_TTL_HEADER = "Nats-Linear-TTL";
+export const LINEAR_OUTBOX_ID_HEADER = "Nats-Linear-Outbox-Id";
+export const LINEAR_DLQ_REASON_HEADER = "Nats-Linear-DLQ-Reason";
+export const LINEAR_DLQ_ORIGINAL_SUBJECT_HEADER = "Nats-Linear-Original-Subject";
 
 export class LinearMessage {
   readonly subject: string;
@@ -57,4 +60,74 @@ export async function subscribeLinear(nc: NatsConnection, subject: string, cb: (
     }
   })();
   return sub;
+}
+
+
+export interface OutboxOptions {
+  maxAttempts?: number;
+  dlqSubject?: string;
+}
+
+export interface OutboxEntry {
+  id: string;
+  subject: string;
+  payload: Uint8Array;
+  ttlMs?: number;
+  attempts: number;
+}
+
+export class Outbox {
+  private readonly entries: OutboxEntry[] = [];
+  private readonly maxAttempts: number;
+  private readonly dlqSubject?: string;
+  private nextId = 0;
+
+  constructor(private readonly nc: NatsConnection, options: OutboxOptions = {}) {
+    this.maxAttempts = Math.max(1, options.maxAttempts ?? 3);
+    this.dlqSubject = options.dlqSubject;
+  }
+
+  enqueueLinear(subject: string, payload: Uint8Array, ttlMs?: number): string {
+    const id = String(++this.nextId);
+    this.entries.push({ id, subject, payload: new Uint8Array(payload), ttlMs, attempts: 0 });
+    return id;
+  }
+
+  get length(): number {
+    return this.entries.length;
+  }
+
+  flush(): void {
+    for (let index = 0; index < this.entries.length;) {
+      const entry = this.entries[index];
+      try {
+        this.nc.publish(entry.subject, entry.payload, { headers: linearHeaders(entry) });
+        this.entries.splice(index, 1);
+      } catch (err) {
+        entry.attempts += 1;
+        if (entry.attempts >= this.maxAttempts && this.dlqSubject) {
+          this.nc.publish(this.dlqSubject, entry.payload, { headers: dlqHeaders(entry, err) });
+          this.entries.splice(index, 1);
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+}
+
+function linearHeaders(entry: OutboxEntry) {
+  const h = headers();
+  h.set(LINEAR_EVENT_HEADER, LINEAR_EVENT_TYPE);
+  h.set(LINEAR_OUTBOX_ID_HEADER, entry.id);
+  if (entry.ttlMs && entry.ttlMs > 0) h.set(LINEAR_TTL_HEADER, String(entry.ttlMs));
+  return h;
+}
+
+function dlqHeaders(entry: OutboxEntry, err: unknown) {
+  const h = headers();
+  h.set(LINEAR_OUTBOX_ID_HEADER, entry.id);
+  h.set(LINEAR_DLQ_ORIGINAL_SUBJECT_HEADER, entry.subject);
+  h.set(LINEAR_DLQ_REASON_HEADER, err instanceof Error ? err.message : String(err));
+  return h;
 }
