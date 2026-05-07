@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN_DIR="$ROOT_DIR/bin"
+SERVER_BIN="$BIN_DIR/nats-server"
+DEFAULT_HOST="127.0.0.1"
+DEFAULT_PORT="4222"
+
+log() { printf '[ubiq] %s\n' "$*"; }
+warn() { printf '[ubiq][warn] %s\n' "$*" >&2; }
+fatal() { printf '[ubiq][error] %s\n' "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+usage() {
+  cat <<USAGE
+Usage:
+  ubiq setup              Install/fetch project dependencies and build the server
+  ubiq run [server args]  Run the built Linear NATS server
+  ubiq help               Show this help
+
+Environment for 'ubiq run':
+  UBIQ_HOST   Host to bind when no explicit args are supplied (default: $DEFAULT_HOST)
+  UBIQ_PORT   Port to bind when no explicit args are supplied (default: $DEFAULT_PORT)
+
+Examples:
+  ./ubiq setup
+  ./ubiq run
+  ./ubiq run -DV -p 4223
+USAGE
+}
+
+setup_go() {
+  have go || fatal "Go is required. Install Go 1.25+ and rerun: ubiq setup"
+  log "Downloading Go modules"
+  (cd "$ROOT_DIR" && go mod download)
+  mkdir -p "$BIN_DIR"
+  log "Building NATS server into $SERVER_BIN"
+  (cd "$ROOT_DIR" && go build -o "$SERVER_BIN" .)
+}
+
+setup_typescript() {
+  if [[ -f "$ROOT_DIR/clients/ts-js/package.json" ]]; then
+    have npm || fatal "npm is required for TypeScript/JavaScript client setup"
+    log "Installing TypeScript/JavaScript client dependencies"
+    npm install --prefix "$ROOT_DIR/clients/ts-js"
+  fi
+}
+
+setup_gleam() {
+  if [[ -f "$ROOT_DIR/clients/gleam/package.json" ]]; then
+    have npm || fatal "npm is required for Gleam client test script setup"
+    log "Installing Gleam client npm metadata"
+    npm install --prefix "$ROOT_DIR/clients/gleam" --ignore-scripts
+    if have gleam; then
+      log "Fetching Gleam dependencies"
+      (cd "$ROOT_DIR/clients/gleam" && gleam deps download)
+    else
+      warn "Gleam executable not found. Install Gleam to run: npm --prefix clients/gleam test"
+    fi
+  fi
+}
+
+setup_rust() {
+  if [[ -f "$ROOT_DIR/clients/rust/Cargo.toml" ]]; then
+    if have cargo; then
+      log "Fetching Rust client dependencies"
+      cargo fetch --manifest-path "$ROOT_DIR/clients/rust/Cargo.toml"
+    else
+      warn "cargo not found. Rust client tests will be skipped until Rust/Cargo is installed."
+    fi
+  fi
+}
+
+cmd_setup() {
+  setup_go
+  setup_typescript
+  setup_gleam
+  setup_rust
+  log "Setup complete"
+  log "Run the server with: ./ubiq run"
+}
+
+cmd_run() {
+  if [[ ! -x "$SERVER_BIN" ]]; then
+    warn "Server binary not found at $SERVER_BIN; building it now"
+    setup_go
+  fi
+
+  if [[ $# -eq 0 ]]; then
+    set -- -a "${UBIQ_HOST:-$DEFAULT_HOST}" -p "${UBIQ_PORT:-$DEFAULT_PORT}"
+  fi
+
+  log "Starting Linear NATS server: $SERVER_BIN $*"
+  exec "$SERVER_BIN" "$@"
+}
+
+case "${1:-help}" in
+  setup)
+    shift
+    [[ $# -eq 0 ]] || fatal "setup does not accept arguments"
+    cmd_setup
+    ;;
+  run)
+    shift
+    cmd_run "$@"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    usage >&2
+    fatal "unknown command: ${1:-}"
+    ;;
+esac
