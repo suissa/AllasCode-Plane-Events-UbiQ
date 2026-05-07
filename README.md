@@ -7,6 +7,12 @@ UbiQ is a NATS server with super powers
 UbiQ extends the NATS server with an opt-in Linear event layer, multi-language helper clients, outbox/DLQ workflows, optional security metadata, and developer automation. It keeps regular NATS behavior intact unless a publisher explicitly marks a message as Linear.
 
 ## What UbiQ adds to NATS
+- [Linear NATS Quickstart](./QUICKSTART.md)
+- [Official Website](https://nats.io)
+- [Official Documentation](https://docs.nats.io)
+- [FAQ](https://docs.nats.io/reference/faq)
+- Watch [a video overview](https://rethink.synadia.com/episodes/1/) of NATS.
+- Watch [this video from SCALE 13x](https://www.youtube.com/watch?v=sm63oAVPqAM) to learn more about its origin story and design philosophy.
 
 ### Header-driven Linear delivery
 
