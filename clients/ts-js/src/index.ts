@@ -1,4 +1,25 @@
-import { headers, type Msg, type NatsConnection, type Subscription } from "nats";
+import { connect as connectNats, headers, type Msg, type NatsConnection, type Subscription } from "nats";
+import { NatsConnectionImpl } from "nats/lib/nats-base-client/nats.js";
+import { setTransportFactory } from "nats/lib/nats-base-client/transport.js";
+import { createQuicTransportFactory, parseQuicServerUrl, type QuicConnectionOptions } from "./adapters/quic.js";
+
+
+export type LinearConnectionMode = "TCP" | "QUIC";
+export type { QuicAdapterOptions, QuicConnectionOptions } from "./adapters/quic.js";
+export { QuicTransport, createQuicTransportFactory, parseQuicServerUrl } from "./adapters/quic.js";
+
+export async function connectLinear(options: QuicConnectionOptions = {}): Promise<NatsConnection> {
+  const { mode = "TCP", quic, ...natsOptions } = options;
+  if (mode === "TCP") return connectNats(natsOptions);
+
+  setTransportFactory({
+    factory: createQuicTransportFactory(quic),
+    defaultPort: 4222,
+    urlParseFn: parseQuicServerUrl,
+  });
+
+  return NatsConnectionImpl.connect(natsOptions);
+}
 
 export const LINEAR_EVENT_HEADER = "Nats-Event-Type";
 export const LINEAR_EVENT_TYPE = "Linear";

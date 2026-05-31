@@ -312,6 +312,9 @@ type Server struct {
 	// Websocket structure
 	websocket srvWebsocket
 
+	// QUIC/WebTransport structure
+	quic srvQuic
+
 	// MQTT structure
 	mqtt srvMQTT
 
@@ -2488,6 +2491,10 @@ func (s *Server) Start() {
 		s.startWebsocketServer()
 	}
 
+	if opts.Quic.Port != 0 {
+		s.startQuicServer()
+	}
+
 	// Start up listen if we want to accept leaf node connections.
 	if opts.LeafNode.Port != 0 {
 		// Will resolve or assign the advertise address for the leafnode listener.
@@ -2637,6 +2644,9 @@ func (s *Server) Shutdown() {
 
 	// Kick websocket server
 	doneExpected += s.closeWebsocketServer()
+
+	// Kick QUIC/WebTransport server
+	doneExpected += s.closeQuicServer()
 
 	// Kick MQTT accept loop
 	if s.mqtt.listener != nil {
@@ -3942,6 +3952,7 @@ func (s *Server) readyForConnections(d time.Duration) error {
 		chk["gateway"] = info{ok: (opts.Gateway.Name == _EMPTY_ || s.gatewayListener != nil), err: s.gatewayListenerErr}
 		chk["leafnode"] = info{ok: (opts.LeafNode.Port == 0 || s.leafNodeListener != nil), err: s.leafNodeListenerErr}
 		chk["websocket"] = info{ok: (opts.Websocket.Port == 0 || s.websocket.listener != nil), err: s.websocket.listenerErr}
+		chk["quic"] = info{ok: (opts.Quic.Port == 0 || s.quic.packetConn != nil), err: s.quic.listenerErr}
 		chk["mqtt"] = info{ok: (opts.MQTT.Port == 0 || s.mqtt.listener != nil), err: s.mqtt.listenerErr}
 		s.mu.RUnlock()
 

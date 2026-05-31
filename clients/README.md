@@ -33,11 +33,43 @@ The outbox stores pending linear publishes in memory, assigns an outbox id, and 
 
 For crash-safe producer guarantees, persist outbox entries in application storage or use JetStream; these helpers are intentionally lightweight and process-local.
 
+## TypeScript transport mode
+
+The TypeScript helper exposes `connectLinear({ mode })` so callers can keep the same NATS command surface while changing the transport:
+
+```ts
+import { connectLinear } from "nats-linear-client";
+
+const nc = await connectLinear({
+  mode: "QUIC",
+  servers: "nats+quic://localhost:4222",
+  quic: { path: "/nats" },
+});
+
+nc.publish("linear.example", new TextEncoder().encode("payload"));
+```
+
+`mode: "TCP"` delegates to the regular `nats` Node transport. `mode: "QUIC"` installs the QUIC adapter from `clients/ts-js/src/adapters/quic.ts`, accepts the server-opened reliable WebTransport bidirectional stream, and passes raw NATS protocol frames (`CONNECT`, `PING`, `SUB`, `PUB`/`HPUB`, etc.) through that stream so publish and subscribe calls keep the same command names and semantics. Runtimes without a global WebTransport implementation can pass one through `quic.webTransport`; constructor-specific options can be passed through `quic.webTransportOptions`.
+
+Server-side QUIC is enabled with the `quic` configuration block. It listens on UDP, requires TLS for HTTP/3/WebTransport, and hands each WebTransport stream to the same NATS client parser used by TCP:
+
+```hcl
+quic {
+  listen: "127.0.0.1:4223"
+  path: "/nats"
+  tls {
+    cert_file: "server.pem"
+    key_file: "key.pem"
+  }
+}
+```
+
 ## Implementations
 
 - Go: `clients/go/linear.go`
 - Rust: `clients/rust/src/lib.rs`
 - TypeScript/JavaScript: `clients/ts-js/src/index.ts`
+- TypeScript/JavaScript QUIC adapter: `clients/ts-js/src/adapters/quic.ts`
 - Gleam: `clients/gleam/src/nats_linear.gleam`
 
 The language-neutral AI generation contract lives in `docs/linear-client-definition.json`. For a full architecture and operations guide, see `docs/linear-nats-architecture.md`.
