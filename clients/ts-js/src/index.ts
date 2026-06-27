@@ -1,4 +1,9 @@
 import { headers, type Msg, type NatsConnection, type Subscription } from "nats";
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import net from "node:net";
+import crypto from "node:crypto";
 
 export const LINEAR_EVENT_HEADER = "Nats-Event-Type";
 export const LINEAR_EVENT_TYPE = "Linear";
@@ -75,7 +80,6 @@ export async function subscribeLinear(nc: NatsConnection, subject: string, cb: (
   })();
   return sub;
 }
-
 
 export interface OutboxOptions {
   maxAttempts?: number;
@@ -157,4 +161,366 @@ function dlqHeaders(entry: OutboxEntry, err: unknown) {
   h.set(LINEAR_DLQ_ORIGINAL_SUBJECT_HEADER, entry.subject);
   h.set(LINEAR_DLQ_REASON_HEADER, err instanceof Error ? err.message : String(err));
   return h;
+}
+
+// ==========================================
+// UbiQ SDK Implementation
+// ==========================================
+
+export class UbiQ {
+  static sidecarProcess: any = null;
+  static sidecarConnected = false;
+  static controlPort = 7448;
+  static activeSubscribers = new Map(); // id -> callback
+  static clientSockets = new Set();
+
+  static async initialize() {
+    const manifest = UbiQ.discoverModule();
+    if (!manifest) {
+      console.log("[ubiq-sdk] No messaging runtime module discovered.");
+      return;
+    }
+
+    if (manifest.binary?.command === "quicmqd") {
+      await UbiQ.ensureSidecarRunning();
+    }
+  }
+
+  static discoverModule() {
+    // Check local package workspaces or node_modules
+    const paths = [
+      path.join(process.cwd(), "Planes/Events/QUICMQ/ubiq.module.yml"),
+      path.join(process.cwd(), "node_modules/@allascode/quicmq/ubiq.module.yml")
+    ];
+    for (const p of paths) {
+      if (fs.existsSync(p)) {
+        // Simple YAML parse of the manifest
+        const content = fs.readFileSync(p, "utf-8");
+        const lines = content.split("\n");
+        const manifestObj: any = {};
+        for (const line of lines) {
+          const parts = line.split(":");
+          if (parts.length >= 2) {
+            const k = parts[0].trim();
+            const v = parts.slice(1).join(":").trim();
+            if (k && v) {
+              if (k === "command") {
+                if (!manifestObj.binary) manifestObj.binary = {};
+                manifestObj.binary.command = v;
+              }
+              manifestObj[k] = v;
+            }
+          }
+        }
+        return manifestObj;
+      }
+    }
+    return null;
+  }
+
+  static async ensureSidecarRunning(): Promise<void> {
+    return new Promise((resolve) => {
+      // Try to connect to check if it's already running
+      const testSocket = net.createConnection({ port: UbiQ.controlPort, host: "127.0.0.1" }, () => {
+        testSocket.end();
+        UbiQ.sidecarConnected = true;
+        resolve();
+      });
+
+      testSocket.on("error", () => {
+        // Not running, spawn it
+        const possiblePaths = [
+          path.join(process.cwd(), "Planes/Events/QUICMQ/bin/quicmqd.js"),
+          path.join(process.cwd(), "node_modules/@allascode/quicmq/bin/quicmqd.js")
+        ];
+        let scriptPath = "";
+        for (const p of possiblePaths) {
+          if (fs.existsSync(p)) {
+            scriptPath = p;
+            break;
+          }
+        }
+
+        if (scriptPath) {
+          console.log(`[ubiq-sdk] Spawning quicmqd sidecar: ${scriptPath}`);
+          UbiQ.sidecarProcess = spawn("node", [scriptPath], {
+            stdio: "ignore",
+            detached: true
+          });
+          UbiQ.sidecarProcess.unref();
+
+          // Poll connection until alive
+          let attempts = 0;
+          const poll = setInterval(() => {
+            attempts++;
+            const conn = net.createConnection({ port: UbiQ.controlPort, host: "127.0.0.1" }, () => {
+              conn.end();
+              clearInterval(poll);
+              UbiQ.sidecarConnected = true;
+              resolve();
+            });
+            conn.on("error", () => {
+              if (attempts > 30) {
+                clearInterval(poll);
+                resolve(); // resolve anyway to avoid hanging
+              }
+            });
+          }, 100);
+        } else {
+          console.warn("[ubiq-sdk] Could not locate quicmqd script to spawn.");
+          resolve();
+        }
+      });
+    });
+  }
+
+  static sendControlCommand(cmdObj: any): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const client = net.createConnection({ port: UbiQ.controlPort, host: "127.0.0.1" }, () => {
+        client.write(JSON.stringify(cmdObj) + "\n");
+      });
+      
+      let buffer = "";
+      client.on("data", (data: Buffer | string) => {
+        buffer += data.toString();
+        if (buffer.includes("\n")) {
+          client.end();
+          try {
+            resolve(JSON.parse(buffer.split("\n")[0]));
+          } catch (err) {
+            reject(err);
+          }
+        }
+      });
+
+      client.on("error", (err: Error) => {
+        reject(err);
+      });
+    });
+  }
+
+  static async publish(event: string, payload: any, entity_id?: string) {
+    await UbiQ.initialize();
+    const res = await UbiQ.sendControlCommand({
+      command: "publish",
+      event,
+      payload,
+      entity_id
+    });
+    if (res.error) {
+      throw new Error(res.error);
+    }
+    return res;
+  }
+
+  static async subscribe(event: string, ...args: any[]) {
+    await UbiQ.initialize();
+    
+    let options = {};
+    let callback: any = null;
+    if (args.length === 2) {
+      options = args[0];
+      callback = args[1];
+    } else {
+      callback = args[0];
+    }
+
+    const subscriberId = `sub_${crypto.randomUUID()}`;
+    UbiQ.activeSubscribers.set(subscriberId, callback);
+
+    // Register with sidecar
+    const res = await UbiQ.sendControlCommand({
+      command: "register_subscriber",
+      id: subscriberId,
+      address: "127.0.0.1",
+      event
+    });
+
+    if (res.error) {
+      throw new Error(res.error);
+    }
+
+    // Connect persistent socket to receive deliveries
+    const socket = net.createConnection({ port: UbiQ.controlPort, host: "127.0.0.1" }, () => {
+      // Keep connection open
+    });
+
+    UbiQ.clientSockets.add(socket);
+
+    let buffer = "";
+    socket.on("data", async (data: Buffer | string) => {
+      buffer += data.toString();
+      if (buffer.includes("\n")) {
+        const parts = buffer.split("\n");
+        const msgStr = parts[0];
+        buffer = parts.slice(1).join("\n");
+        try {
+          const msgObj = JSON.parse(msgStr);
+          if (msgObj.type === "delivery" && msgObj.subscriber_id === subscriberId) {
+            // Step 1: ACK the delivery
+            const ackRes = await UbiQ.sendControlCommand({
+              command: "ack",
+              delivery_id: msgObj.delivery_id
+            });
+
+            if (ackRes.error) {
+              console.error(`[ubiq-sdk] ACK failed: ${ackRes.error}`);
+              return;
+            }
+
+            const decypherKey = ackRes.decypher_key;
+            
+            // Decrypt simulation (strip cipher(...) prefix)
+            let payload = msgObj.payload_ciphertext;
+            if (payload.startsWith("cipher(")) {
+              payload = JSON.parse(payload.substring(7, payload.length - 1));
+            }
+
+            // Run application callback
+            await callback({
+              event_id: msgObj.event_id,
+              delivery_id: msgObj.delivery_id,
+              payload
+            });
+
+            // Step 2: Mark as consumed
+            const consumedRes = await UbiQ.sendControlCommand({
+              command: "consumed",
+              delivery_id: msgObj.delivery_id,
+              decypher_key: decypherKey
+            });
+
+            if (consumedRes.error) {
+              console.error(`[ubiq-sdk] Consumed failed: ${consumedRes.error}`);
+            }
+          }
+        } catch (err) {
+          // ignore parsing error for non-json
+        }
+      }
+    });
+
+    socket.on("close", () => {
+      UbiQ.clientSockets.delete(socket);
+    });
+
+    return {
+      unsubscribe: async () => {
+        socket.end();
+        await UbiQ.sendControlCommand({
+          command: "unregister_subscriber",
+          id: subscriberId
+        });
+        UbiQ.activeSubscribers.delete(subscriberId);
+      }
+    };
+  }
+
+  static agent(name: string, agentConfig: { schema: string; graflow: string; counter: number }) {
+    return {
+      subscribe: async (event: string, callback: any) => {
+        await UbiQ.initialize();
+
+        // Compute Agent hashes
+        const canonicalSchema = agentConfig.schema;
+        const canonicalGraflow = agentConfig.graflow;
+
+        const computeSha256 = (data: string) => crypto.createHash("sha256").update(data).digest("hex");
+        const schemaHash = computeSha256(canonicalSchema);
+        const graflowHash = computeSha256(canonicalGraflow);
+        const agentHash = computeSha256(`${name}:${schemaHash}:${graflowHash}`);
+        const serverId = "official";
+        const agentInstanceId = computeSha256(`${serverId}:${agentHash}:${agentConfig.counter}`);
+
+        UbiQ.activeSubscribers.set(agentInstanceId, callback);
+
+        // Register agent subscriber
+        const res = await UbiQ.sendControlCommand({
+          command: "register_subscriber",
+          id: agentInstanceId,
+          address: "127.0.0.1",
+          event,
+          server_id: serverId,
+          agent_hash: agentHash,
+          counter: agentConfig.counter
+        });
+
+        if (res.error) {
+          throw new Error(res.error);
+        }
+
+        const socket = net.createConnection({ port: UbiQ.controlPort, host: "127.0.0.1" });
+        UbiQ.clientSockets.add(socket);
+
+        let buffer = "";
+        socket.on("data", async (data: Buffer | string) => {
+          buffer += data.toString();
+          if (buffer.includes("\n")) {
+            const parts = buffer.split("\n");
+            const msgStr = parts[0];
+            buffer = parts.slice(1).join("\n");
+            try {
+              const msgObj = JSON.parse(msgStr);
+              if (msgObj.type === "delivery" && msgObj.subscriber_id === agentInstanceId) {
+                const ackRes = await UbiQ.sendControlCommand({
+                  command: "ack",
+                  delivery_id: msgObj.delivery_id
+                });
+                const decypherKey = ackRes.decypher_key;
+
+                let payload = msgObj.payload_ciphertext;
+                if (payload.startsWith("cipher(")) {
+                  payload = JSON.parse(payload.substring(7, payload.length - 1));
+                }
+
+                await callback({
+                  event_id: msgObj.event_id,
+                  delivery_id: msgObj.delivery_id,
+                  payload
+                });
+
+                await UbiQ.sendControlCommand({
+                  command: "consumed",
+                  delivery_id: msgObj.delivery_id,
+                  decypher_key: decypherKey
+                });
+              }
+            } catch {
+              // ignore
+            }
+          }
+        });
+
+        socket.on("close", () => {
+          UbiQ.clientSockets.delete(socket);
+        });
+
+        return {
+          unsubscribe: async () => {
+            socket.end();
+            await UbiQ.sendControlCommand({
+              command: "unregister_subscriber",
+              id: agentInstanceId,
+              server_id: serverId,
+              agent_hash: agentHash,
+              counter: agentConfig.counter
+            });
+            UbiQ.activeSubscribers.delete(agentInstanceId);
+          }
+        };
+      }
+    };
+  }
+
+  static async shutdown() {
+    for (const socket of UbiQ.clientSockets as any) {
+      socket.end();
+    }
+    UbiQ.clientSockets.clear();
+    try {
+      await UbiQ.sendControlCommand({ command: "shutdown" });
+    } catch {
+      // ignore if already shut down
+    }
+  }
 }
