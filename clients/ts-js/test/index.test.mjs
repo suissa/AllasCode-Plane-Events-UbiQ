@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { headers } from "nats";
-import { DPOP_HEADER, LINEAR_DLQ_ORIGINAL_SUBJECT_HEADER, LINEAR_DLQ_REASON_HEADER, LINEAR_EVENT_HEADER, LINEAR_EVENT_TYPE, LINEAR_OUTBOX_ID_HEADER, LINEAR_PQC_ALGORITHM, LINEAR_PQC_ALGORITHM_HEADER, LINEAR_PQC_PUBLIC_KEY_HEADER, LINEAR_TTL_HEADER, LinearMessage, Outbox } from "../dist/index.js";
+import { DPOP_HEADER, LINEAR_DLQ_ORIGINAL_SUBJECT_HEADER, LINEAR_DLQ_REASON_HEADER, LINEAR_EVENT_HEADER, LINEAR_EVENT_TYPE, LINEAR_OUTBOX_ID_HEADER, LINEAR_PQC_ALGORITHM, LINEAR_PQC_ALGORITHM_HEADER, LINEAR_PQC_PUBLIC_KEY_HEADER, LINEAR_TTL_HEADER, LinearMessage, Outbox, QuicTransport, parseQuicServerUrl } from "../dist/index.js";
 
 function msg(data, linear = false, ttlMs) {
   const h = headers();
@@ -92,4 +92,63 @@ test("outbox applies supplied PQC and DPoP security headers", () => {
   assert.equal(published[0].options.headers.get(LINEAR_PQC_ALGORITHM_HEADER), LINEAR_PQC_ALGORITHM);
   assert.equal(published[0].options.headers.get(LINEAR_PQC_PUBLIC_KEY_HEADER), "kyber-public-key");
   assert.equal(published[0].options.headers.get(DPOP_HEADER), "proof.jwt");
+});
+
+
+test("quic adapter strips QUIC protocols for NATS server parsing", () => {
+  assert.equal(parseQuicServerUrl("quic://127.0.0.1:4222"), "127.0.0.1:4222");
+  assert.equal(parseQuicServerUrl("nats+quic://example.com:4222"), "example.com:4222");
+});
+
+test("quic adapter sends and receives raw NATS protocol frames", async () => {
+  const received = [];
+  let controller;
+  let closeTransport;
+  const readable = new ReadableStream({
+    start(c) {
+      controller = c;
+    },
+  });
+  const writable = new WritableStream({
+    write(chunk) {
+      received.push(new Uint8Array(chunk));
+    },
+  });
+
+  class FakeWebTransport {
+    constructor(url) {
+      this.url = url;
+      this.ready = Promise.resolve();
+      this.closed = new Promise((resolve) => {
+        closeTransport = resolve;
+      });
+      this.incomingBidirectionalStreams = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ readable, writable });
+          controller.close();
+        },
+      });
+    }
+
+    async createBidirectionalStream() {
+      throw new Error("expected server-opened stream");
+    }
+
+    close() {
+      closeTransport();
+    }
+  }
+
+  const transport = new QuicTransport({ webTransport: FakeWebTransport, path: "nats" });
+  await transport.connect({ listen: "localhost:4222" }, {});
+
+  transport.send(new TextEncoder().encode("PING\r\n"));
+  assert.equal(new TextDecoder().decode(received[0]), "PING\r\n");
+
+  const next = transport[Symbol.asyncIterator]().next();
+  controller.enqueue(new TextEncoder().encode("PONG\r\n"));
+  const delivered = await next;
+  assert.equal(new TextDecoder().decode(delivered.value), "PONG\r\n");
+
+  await transport.close();
 });

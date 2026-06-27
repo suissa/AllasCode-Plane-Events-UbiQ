@@ -469,6 +469,7 @@ type Options struct {
 	SyncAlways                 bool              `json:"-"`
 	JsAccDefaultDomain         map[string]string `json:"-"` // account to domain name mapping
 	Websocket                  WebsocketOpts     `json:"-"`
+	Quic                       QuicOpts          `json:"-"`
 	MQTT                       MQTTOpts          `json:"-"`
 	ProfPort                   int               `json:"-"`
 	ProfBlockRate              int               `json:"-"`
@@ -680,6 +681,24 @@ type WebsocketOpts struct {
 	// Useful for adding custom headers like Strict-Transport-Security.
 	Headers map[string]string
 
+	// Snapshot of configured TLS options.
+	tlsConfigOpts *TLSConfigOpts
+}
+
+// QuicOpts are options for QUIC/WebTransport client connections.
+type QuicOpts struct {
+	// The server will accept QUIC client connections on this hostname/IP.
+	Host string
+	// The server will accept QUIC client connections on this UDP port.
+	Port int
+	// The host:port to advertise to QUIC clients in the cluster.
+	Advertise string
+	// WebTransport endpoint path. Defaults to /nats.
+	Path string
+	// Reordering timeout used by the WebTransport server.
+	HandshakeTimeout time.Duration
+	// TLS configuration used by HTTP/3/WebTransport. Required by WebTransport.
+	TLSConfig *tls.Config
 	// Snapshot of configured TLS options.
 	tlsConfigOpts *TLSConfigOpts
 }
@@ -1769,6 +1788,11 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 		o.ReconnectErrorReports = int(v.(int64))
 	case "websocket", "ws":
 		if err := parseWebsocket(tk, o, errors, warnings); err != nil {
+			*errors = append(*errors, err)
+			return
+		}
+	case "quic":
+		if err := parseQuic(tk, o, errors, warnings); err != nil {
 			*errors = append(*errors, err)
 			return
 		}
@@ -5539,6 +5563,65 @@ func parseWebsocket(v any, o *Options, errors *[]error, warnings *[]error) error
 			}
 		case "ping_interval":
 			o.Websocket.PingInterval = parseDuration("ping_interval", tk, mv, errors, warnings)
+		default:
+			if !tk.IsUsedVariable() {
+				err := &unknownConfigFieldErr{
+					field: mk,
+					configErr: configErr{
+						token: tk,
+					},
+				}
+				*errors = append(*errors, err)
+				continue
+			}
+		}
+	}
+	return nil
+}
+
+func parseQuic(v any, o *Options, errors *[]error, warnings *[]error) error {
+	var lt token
+	defer convertPanicToErrorList(&lt, errors)
+
+	tk, v := unwrapValue(v, &lt)
+	gm, ok := v.(map[string]any)
+	if !ok {
+		return &configErr{tk, fmt.Sprintf("Expected quic to be a map, got %T", v)}
+	}
+	for mk, mv := range gm {
+		tk, mv = unwrapValue(mv, &lt)
+		switch strings.ToLower(mk) {
+		case "listen":
+			hp, err := parseListen(mv)
+			if err != nil {
+				err := &configErr{tk, err.Error()}
+				*errors = append(*errors, err)
+				continue
+			}
+			o.Quic.Host = hp.host
+			o.Quic.Port = hp.port
+		case "port":
+			o.Quic.Port = int(mv.(int64))
+		case "host", "net":
+			o.Quic.Host = mv.(string)
+		case "advertise":
+			o.Quic.Advertise = mv.(string)
+		case "path":
+			o.Quic.Path = mv.(string)
+		case "handshake_timeout", "reordering_timeout":
+			o.Quic.HandshakeTimeout = parseDuration(mk, tk, mv, errors, warnings)
+		case "tls":
+			tc, err := parseTLS(tk, true)
+			if err != nil {
+				*errors = append(*errors, err)
+				continue
+			}
+			if o.Quic.TLSConfig, err = GenTLSConfig(tc); err != nil {
+				err := &configErr{tk, err.Error()}
+				*errors = append(*errors, err)
+				continue
+			}
+			o.Quic.tlsConfigOpts = tc
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{

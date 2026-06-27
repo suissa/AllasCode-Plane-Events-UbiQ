@@ -159,6 +159,12 @@ Producer application
 - Treat DPoP and PQC headers as verifiable security metadata at application boundaries until all consumers enforce them.
 - Use JetStream for broker-side retention, replay, and durable consumer workflows. Linear client TTL is local memory cleanup, not stream retention.
 
+## QUIC transport mode for TypeScript
+
+The TypeScript helper adds `connectLinear({ mode: "TCP" | "QUIC" })`. TCP mode delegates to the standard `nats` Node transport. QUIC mode registers `QuicTransport`, parses `quic://` and `nats+quic://` server URLs, accepts the server-opened WebTransport bidirectional stream, and forwards the same raw NATS protocol commands used by TCP over that reliable QUIC stream. Because the NATS protocol bytes are unchanged, callers continue using the same `publish`, `subscribe`, request/reply, header, outbox, and DLQ APIs while only switching `mode` and the server URL/protocol.
+
+The adapter defaults to `https://<host:port>/nats` for the WebTransport endpoint and accepts a custom path, URL builder, WebTransport constructor, or constructor-specific WebTransport options through `quic` options. On the server, the `quic` options block opens a UDP HTTP/3/WebTransport listener, upgrades requests on the configured path, opens a reliable stream to the client, and passes that stream into the same NATS client parser used by TCP. This keeps command names and payload framing unchanged (`CONNECT`, `PING`, `SUB`, `PUB`/`HPUB`, etc.).
+
 ## Compatibility notes
 
 - Existing NATS clients can still publish and subscribe normally.
@@ -171,11 +177,14 @@ Producer application
 | Component | Path |
 | --- | --- |
 | Server linear header constants and routing | `server/client.go` |
+| Server QUIC/WebTransport listener | `server/quic.go` |
+| Server QUIC tests | `server/quic_test.go` |
 | Server linear behavior tests | `server/linear_event_test.go` |
 | Go client, outbox, DLQ, mTLS/PQC/DPoP, managed queue | `clients/go/linear.go` |
 | Go client tests | `clients/go/linear_test.go` |
 | Rust client, outbox, DLQ | `clients/rust/src/lib.rs` |
 | TypeScript/JavaScript client, outbox, DLQ | `clients/ts-js/src/index.ts` |
+| TypeScript/JavaScript QUIC adapter | `clients/ts-js/src/adapters/quic.ts` |
 | TypeScript/JavaScript tests | `clients/ts-js/test/index.test.mjs` |
 | AI client behavior definition | `docs/linear-client-definition.json` |
 | Gleam generated client and tests | `clients/gleam` |
